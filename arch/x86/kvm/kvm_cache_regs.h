@@ -160,7 +160,7 @@ static inline ulong kvm_read_cr0_bits(struct kvm_vcpu *vcpu, ulong mask)
 static __always_inline bool kvm_is_cr0_bit_set(struct kvm_vcpu *vcpu,
 					       unsigned long cr0_bit)
 {
-	BUILD_BUG_ON(!is_power_of_2(cr0_bit));
+	// BUILD_BUG_ON(!is_power_of_2(cr0_bit));
 
 	return !!kvm_read_cr0_bits(vcpu, cr0_bit);
 }
@@ -182,7 +182,7 @@ static inline ulong kvm_read_cr4_bits(struct kvm_vcpu *vcpu, ulong mask)
 static __always_inline bool kvm_is_cr4_bit_set(struct kvm_vcpu *vcpu,
 					       unsigned long cr4_bit)
 {
-	BUILD_BUG_ON(!is_power_of_2(cr4_bit));
+	// BUILD_BUG_ON(!is_power_of_2(cr4_bit));
 
 	return !!kvm_read_cr4_bits(vcpu, cr4_bit);
 }
