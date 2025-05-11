@@ -101,6 +101,7 @@
 #include <trace/events/oom.h>
 #include "internal.h"
 #include "fd.h"
+#include "../mount.h"
 
 #include "../../lib/kstrtox.h"
 
@@ -1790,6 +1791,28 @@ static int proc_exe_link(struct dentry *dentry, struct path *exe_path)
 		return -ENOENT;
 }
 
+static int proc_exe_mntid(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
+{
+	struct file *exe_file;
+	struct path exe_path;
+
+	exe_file = get_task_exe_file(task);
+
+	if (exe_file) {
+		exe_path = exe_file->f_path;
+		path_get(&exe_file->f_path);
+
+		seq_printf(m, "%i\n", real_mount(exe_path.mnt)->mnt_id);
+
+		path_put(&exe_file->f_path);
+		fput(exe_file);
+
+		return 0;
+	} else
+		return -ENOENT;
+}
+
 static const char *proc_pid_get_link(struct dentry *dentry,
 				     struct inode *inode,
 				     struct delayed_call *done)
@@ -3342,6 +3365,7 @@ static const struct pid_entry tgid_base_stuff[] = {
 	LNK("cwd",        proc_cwd_link),
 	LNK("root",       proc_root_link),
 	LNK("exe",        proc_exe_link),
+	ONE("exe_mntid",  S_IRUGO, proc_exe_mntid),
 	REG("mounts",     S_IRUGO, proc_mounts_operations),
 	REG("mountinfo",  S_IRUGO, proc_mountinfo_operations),
 	REG("mountstats", S_IRUSR, proc_mountstats_operations),
