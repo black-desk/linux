@@ -722,7 +722,8 @@ acquired:
 skip_wait:
 	/* got the lock - cleanup and rejoice! */
 	lock_acquired(&lock->dep_map, ip);
-	cgroup_ifs_leave_lock(ifs_clock, IFS_MUTEX);
+	if (ifs_clock)
+		cgroup_ifs_leave_lock(ifs_clock, IFS_MUTEX);
 	trace_contention_end(lock, 0);
 
 	if (ww_ctx)
@@ -736,7 +737,8 @@ err:
 	__set_current_state(TASK_RUNNING);
 	__mutex_remove_waiter(lock, &waiter);
 err_early_kill:
-	cgroup_ifs_leave_lock(ifs_clock, IFS_MUTEX);
+	if (ifs_clock)
+		cgroup_ifs_leave_lock(ifs_clock, IFS_MUTEX);
 	trace_contention_end(lock, ret);
 	raw_spin_unlock(&lock->wait_lock);
 	debug_mutex_free_waiter(&waiter);
