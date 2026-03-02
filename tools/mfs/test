@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+
+echo "=== MFS Test Script ==="
+echo ""
+
+# 创建目录（直接用文件系统）
+mkdir -p /var/tmp/mfs/data
+mkdir -p /var/tmp/mfs/cache
+mkdir -p /var/tmp/mfs/mount
+
+# 启动后台进程监控内核日志
+echo "Starting kernel log monitor..."
+(
+	dmesg
+) &
+DMESG_PID=$!
+echo "dmesg monitor PID: $DMESG_PID"
+
+# 1. 挂载 MFS - local 模式要求 mtree == cachedir（相同目录）
+echo "Step 1: Mounting MFS in LOCAL mode (mtree == cachedir)..."
+mount -t mfs -o mode=local,mtree=/var/tmp/mfs/data,cachedir=/var/tmp/mfs/data /dev/null /var/tmp/mfs/mount
+if [ $? -ne 0 ]; then
+    echo "ERROR: mount failed"
+    exit 1
+fi
+mount | grep mfs
+
+# 2. 同步并清空 page cache
+echo ""
+echo "Step 2: Syncing and dropping page cache..."
+sync
+echo 3 > /proc/sys/vm/drop_caches
+
+# 3. 检查 cache 状态
+echo ""
+echo "Step 3: Checking cache status BEFORE file creation..."
+cat /proc/meminfo | grep -E 'Cached|Buffers|Slab|SReclaimable'
+
+# 4. 在data目录下创建大文件（>4KB）
+echo ""
+echo "Step 4: Creating large file (>4KB) in data directory..."
+dd if=/dev/zero of=/var/tmp/mfs/data/bigfile bs=1M count=1 2>/dev/null
+sync
+echo "Created bigfile with MD5:"
+md5sum /var/tmp/mfs/data/bigfile
+
+# 5. 再次清空 page cache（确保刚才创建的文件不在cache中）
+echo ""
+echo "Step 5: Dropping page cache again after file creation..."
+sync
+echo 3 > /proc/sys/vm/drop_caches
+sync
+sleep 1  # 确保drop_caches生效
+
+# 6. 检查哪些页面在cache中
+echo ""
+echo "Step 6: Checking which pages are in cache with vmtouch..."
+echo "File: /var/tmp/mfs/data/bigfile"
+vmtouch -v /var/tmp/mfs/data/bigfile 2>&1 | tail -20
+
+# 7. 检查 cache 状态
+echo ""
+echo "Step 7: Checking cache status BEFORE read..."
+cat /proc/meminfo | grep -E 'Cached|Buffers|Slab|SReclaimable'
+
+# 8. 启动守护进程
+echo ""
+echo "Step 8: Starting mfsd daemon..."
+tools/mfs/mfsd /var/tmp/mfs/mount &
+MFS_PID=$!
+echo "mfsd PID: $MFS_PID"
+
+# 等待守护进程启动
+sleep 2
+
+# 9. 读取大文件（应该触发 CACHE MISS 事件）
+echo ""
+echo "Step 9: Reading only ONE 4KB block from bigfile via MFS mount point (should trigger MISS event)..."
+dd if=/var/tmp/mfs/mount/bigfile of=/dev/null bs=4K count=1 2>/dev/null
+echo "Bigfile read completed (read only 1 block of 4KB)"
+
+# 等待守护进程处理事件
+sleep 3
+
+# 10. 检查 cache 状态
+echo ""
+echo "Step 10: Checking cache status AFTER first read..."
+cat /proc/meminfo | grep -E 'Cached|Buffers|Slab|SReclaimable'
+
+# 10.5. 用vmtouch检查哪些页面在cache中（只读4KB后）
+echo ""
+echo "Step 10.5: Checking which pages are in cache with vmtouch AFTER reading 4KB..."
+echo "File: /var/tmp/mfs/data/bigfile"
+vmtouch -v /var/tmp/mfs/data/bigfile 2>&1 | tail -20
+
+# 11. 再读取一次同一个4KB块（应该是 CACHE HIT）
+echo ""
+echo "Step 11: Reading the SAME 4KB block again (should be CACHE HIT)..."
+dd if=/var/tmp/mfs/mount/bigfile of=/dev/null bs=4K count=1 2>/dev/null
+echo "Second read completed (same 4KB block)"
+
+# 等待
+sleep 2
+
+# 12. 检查最终 cache状态
+echo ""
+echo "Step 13: Checking which pages are in cache with vmtouch..."
+echo "File: /var/tmp/mfs/data/bigfile"
+vmtouch -v /var/tmp/mfs/data/bigfile 2>&1 | tail -20
+
+# 13. 检查最终 cache状态
+echo ""
+echo "Step 14: Final cache status:"
+cat /proc/meminfo | grep -E 'Cached|Buffers|Slab|SReclaimable'
+
+# 13. 清理
+echo ""
+echo "Step 13: Cleanup..."
+kill $MFS_PID 2>/dev/null
+kill $DMESG_PID 2>/dev/null
+sleep 1
+umount /var/tmp/mfs/mount 2>/dev/null
+if [ $? -ne 0 ]; then
+    echo "ERROR: umount MFS failed"
+    exit 1
+fi
+rm -rf /var/tmp/mfs
+echo "Cleanup done"
+echo ""
+echo "=== Test Complete ==="

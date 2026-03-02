@@ -1,2 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
 mfsd
+mfsd_prefetch
+mfsd_evict_simple

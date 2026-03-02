@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <poll.h>
 #include <string.h>
@@ -23,19 +24,24 @@
 #include <sys/statfs.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-
-#include <map>
-#include <string>
+#include <pthread.h>
 
 #include "../../include/uapi/linux/mfs.h"
 #include "../../include/uapi/linux/magic.h"
 
-using namespace std;
-
 #define pr_err(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
 
 static int mfs_mode = -1;
-static map<string, uint64_t> files;
+
+#define MAX_FILES 1024
+
+struct file_entry {
+	char *path;
+	uint64_t len;
+};
+
+static struct file_entry files[MAX_FILES];
+static int file_count = 0;
 
 struct thread_ctx {
 	char *path;
@@ -47,27 +53,40 @@ static int get_files(const char *parent)
 {
 	DIR *dir;
 	struct dirent *entry;
-	string filepath;
+	char filepath[PATH_MAX];
 	struct stat buf;
 
+	pr_err("get_files: opening directory %s\n", parent);
 	if ((dir = opendir(parent)) == NULL) {
 		perror("opening directory failed");
 		return -1;
 	}
 
+	pr_err("get_files: scanning directory...\n");
 	while ((entry = readdir(dir)) != NULL) {
 		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
 			continue;
 
-		filepath = string(parent) + "/" + string(entry->d_name);
-		if (stat(filepath.c_str(), &buf) == -1) {
-			pr_err("stat path:%s failed\n", filepath.c_str());
+		snprintf(filepath, sizeof(filepath), "%s/%s", parent, entry->d_name);
+		pr_err("get_files: checking %s\n", entry->d_name);
+		if (stat(filepath, &buf) == -1) {
+			pr_err("stat path:%s failed\n", filepath);
 			continue;
 		}
-		if (S_ISDIR(buf.st_mode))
+		if (S_ISDIR(buf.st_mode)) {
+			pr_err("get_files: skipping directory %s\n", entry->d_name);
 			continue;
-		files.insert(pair<string, uint64_t>(filepath, buf.st_size));
+		}
+		if (file_count < MAX_FILES) {
+			pr_err("get_files: adding file %s, size=%zu, count=%d\n",
+			       entry->d_name, buf.st_size, file_count);
+			files[file_count].path = strdup(filepath);
+			files[file_count].len = buf.st_size;
+			file_count++;
+		}
 	}
+	closedir(dir);
+	pr_err("get_files: completed, total files=%d\n", file_count);
 
 	return 0;
 }
@@ -75,12 +94,16 @@ static int get_files(const char *parent)
 static void *fault(void *arg)
 {
 	struct thread_ctx *ctx = (struct thread_ctx *)arg;
-	int fd = open(ctx->path, O_RDONLY);
+	int fd;
+
+	pr_err("fault thread: starting for %s, len=%zu\n", ctx->path, ctx->len);
+	fd = open(ctx->path, O_RDONLY);
 	if (fd < 0) {
 		pr_err("open file:%s failed\n", ctx->path);
 		free(ctx);
 		return NULL;
 	}
+	pr_err("fault thread: opened fd=%d\n", fd);
 
 	void *addr = mmap(NULL, ctx->len, PROT_READ, MAP_SHARED, fd, 0);
 	uint64_t idx;
@@ -90,36 +113,48 @@ static void *fault(void *arg)
 		tmp = buffer[idx];
 		total += tmp;
 	}
+	pr_err("fault thread: finished reading, total=%c\n", total);
 	munmap(addr, ctx->len);
 	close(fd);
 	free(ctx);
+	pr_err("fault thread: completed\n");
 	return NULL;
 }
 
 static int process_local_read(struct mfs_msg *msg)
 {
-	map<string, uint64_t>::iterator it;
 	struct thread_ctx *ctx;
 	pthread_t t0;
-	int ret;
+	int i, ret;
 
-	if (files.empty())
+	pr_err("process_local_read: fd=%d, opcode=%d, len=%d\n",
+	       msg->fd, msg->opcode, msg->len);
+
+	if (file_count == 0) {
+		pr_err("process_local_read: no files to process\n");
 		return 0;
+	}
 
-	for (it = files.begin(); it != files.end(); ++it) {
+	pr_err("process_local_read: processing %d files\n", file_count);
+	for (i = 0; i < file_count; i++) {
+		pr_err("process_local_read: creating fault thread for %s\n", files[i].path);
 		ctx = (struct thread_ctx *)malloc(sizeof(struct thread_ctx));
 		if (!ctx) {
 			perror("malloc ctx failed");
 			continue;
 		}
-		ctx->path = strdup(it->first.c_str());
+		ctx->path = strdup(files[i].path);
 		ctx->off = 0;
-		ctx->len = it->second;
+		ctx->len = files[i].len;
 		ret = pthread_create(&t0, NULL, fault, ctx);
 		if (ret == 0)
 			pthread_detach(t0);
 	}
-	files.clear();
+	for (i = 0; i < file_count; i++) {
+		free(files[i].path);
+		files[i].path = NULL;
+	}
+	file_count = 0;
 	return 0;
 }
 
@@ -248,6 +283,7 @@ int main(int argc, char *argv[])
 	ret = get_files(parent);
 	if (ret < 0)
 		return -1;
+	pr_err("get_files completed, file_count:%d\n", file_count);
 
 	while (1) {
 		ret = poll(&pfd, 1, -1);

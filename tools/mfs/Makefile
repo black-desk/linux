@@ -3,7 +3,7 @@
 
 CFLAGS = -Wall -Wextra
 
-PROGS := mfsd mfsd_prefetch
+PROGS := mfsd mfsd_prefetch mfsd_evict_simple
 
 all: $(PROGS)
 %: %.c
