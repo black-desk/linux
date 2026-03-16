@@ -56,7 +56,6 @@ static int evict_queue_count = 0;
 static int mfs_mode = -1;
 static int current_mfs_fd = -1;
 static char *mtree_path = NULL;
-static int mfs_device_fd = -1;  /* Save /dev/mfsX fd for ioctl eviction */
 
 /* Get full file path from MFS internal fd using MFS_IOC_RPATH ioctl */
 /* MFS_IOC_RPATH returns relative path to mtree, need to prepend mtree_path */
@@ -160,7 +159,8 @@ static int evict_file(int mfs_fd, const char *path, const char *reason)
 	evict.off = 0;
 	evict.len = 0;  /* 0 means evict entire file */
 
-	ret = ioctl(mfs_device_fd, MFS_IOC_EVICT, (unsigned long)&evict);
+	/* Use mfs_fd (file descriptor) for ioctl, not mfs_device_fd */
+	ret = ioctl(mfs_fd, MFS_IOC_EVICT, (unsigned long)&evict);
 	if (ret == 0) {
 		pr_err("[EVICT] %s fd=%d (%s)\n", path, mfs_fd, reason);
 		return 0;
@@ -302,7 +302,6 @@ int main(int argc, char *argv[])
 		pr_err("open %s failed\n", devname);
 		return -1;
 	}
-	mfs_device_fd = fd;  /* Save for ioctl eviction */
 
 	ioctl_mfs_mode(fd);
 
