@@ -144,6 +144,27 @@ static long _ioc_ra(struct mfs_cache_object *object,
 	return 0;
 }
 
+static long _ioc_evict(struct mfs_cache_object *object,
+		      struct mfs_ioc_evict *evict)
+{
+	struct file *file = object->cache_file;
+	struct address_space *mapping = file->f_mapping;
+	pgoff_t start_index, end_index;
+
+	/* Handle len=0 special case: evict entire file */
+	if (evict->len == 0) {
+		start_index = 0;
+		end_index = ULONG_MAX;
+	} else {
+		start_index = evict->off >> PAGE_SHIFT;
+		end_index = (evict->off + evict->len) >> PAGE_SHIFT;
+	}
+
+	/* Call standard Linux page cache eviction function */
+	invalidate_mapping_pages(mapping, start_index, end_index);
+	return 0;
+}
+
 static long fd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct mfs_cache_object *object = filp->private_data;
@@ -208,6 +229,17 @@ static long fd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 				  rpath->len + 1 + sizeof(struct mfs_ioc_rpath)))
 			ret = -EFAULT;
 		kfree(rpath);
+		break;
+	}
+	case MFS_IOC_EVICT:
+	{
+		struct mfs_ioc_evict evict;
+
+		if (sbi->mode != MFS_MODE_LOCAL)
+			return -EOPNOTSUPP;
+		if (copy_from_user(&evict, (void __user *)arg, sizeof(evict)))
+			return -EFAULT;
+		ret = _ioc_evict(object, &evict);
 		break;
 	}
 	default:

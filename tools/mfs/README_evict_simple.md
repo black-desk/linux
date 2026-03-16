@@ -121,3 +121,21 @@ The test script will:
 2. Start mfsd_evict_simple daemon
 3. Read files sequentially
 4. Verify eviction behavior using vmtouch
+
+## Alternative: mfsd_evict_ioctl
+
+For better performance using kernel ioctl, see `mfsd_evict_ioctl` demo.
+It uses `MFS_IOC_EVICT` ioctl instead of `posix_fadvise` and does not
+require opening user-space file descriptors.
+
+**Quick comparison**:
+
+| Feature | mfsd_evict_simple | mfsd_evict_ioctl |
+|---------|-------------------|-------------------|
+| Eviction method | posix_fadvise | MFS_IOC_EVICT ioctl |
+| User-space fd required | Yes | No |
+| Kernel round trips | More | Fewer |
+| Code complexity | Slightly higher | Slightly lower |
+
+Both demos implement the same eviction strategy and can be used
+interchangeably based on your preference and requirements.

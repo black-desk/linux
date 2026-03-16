@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+
+echo "=== MFS Evict IOCTL Test Script (with vmtouch cache check) ==="
+echo ""
+
+# 创建目录（直接用文件系统）
+mkdir -p /var/tmp/mfs/data
+mkdir -p /var/tmp/mfs/cache
+mkdir -p /var/tmp/mfs/mount
+
+# 1. 挂载 MFS - local 模式要求 mtree == cachedir（相同目录）
+echo "Step 1: Mounting MFS in LOCAL mode (mtree == cachedir)..."
+mount -t mfs -o mode=local,mtree=/var/tmp/mfs/data,cachedir=/var/tmp/mfs/data /dev/null /var/tmp/mfs/mount
+if [ $? -ne 0 ]; then
+    echo "ERROR: mount failed"
+    exit 1
+fi
+mount | grep mfs
+
+# 2. 同步并清空 page cache
+echo ""
+echo "Step 2: Syncing and dropping page cache..."
+sync
+echo 3 > /proc/sys/vm/drop_caches
+
+# 3. 在data目录下创建多个大文件（>4KB）
+echo ""
+echo "Step 3: Creating multiple large files (>4KB) in data directory..."
+dd if=/dev/zero of=/var/tmp/mfs/data/file1 bs=1M count=1 2>/dev/null
+dd if=/dev/zero of=/var/tmp/mfs/data/file2 bs=1M count=1 2>/dev/null
+dd if=/dev/zero of=/var/tmp/mfs/data/file3 bs=1M count=1 2>/dev/null
+sync
+echo "Created file1, file2, file3 (each 1MB)"
+
+# 4. 再次清空 page cache（确保刚才创建的文件不在cache中）
+echo ""
+echo "Step 4: Dropping page cache again after file creation..."
+sync
+echo 3 > /proc/sys/vm/drop_caches
+sync
+sleep 1  # 确保drop_caches生效
+
+# 5. 检查初始 cache 状态
+echo ""
+echo "Step 5: Checking initial cache status with vmtouch..."
+echo "=== file1 ==="
+vmtouch -v /var/tmp/mfs/data/file1 2>&1 | tail -10
+echo "=== file2 ==="
+vmtouch -v /var/tmp/mfs/data/file2 2>&1 | tail -10
+echo "=== file3 ==="
+vmtouch -v /var/tmp/mfs/data/file3 2>&1 | tail -10
+
+# 6. 启动 mfsd_evict_ioctl 守护进程
+echo ""
+echo "Step 6: Starting mfsd_evict_ioctl daemon (using MFS_IOC_EVICT ioctl)..."
+tools/mfs/mfsd_evict_ioctl /var/tmp/mfs/mount /var/tmp/mfs/data &
+MFS_PID=$!
+echo "mfsd_evict_ioctl PID: $MFS_PID"
+
+# 等待守护进程启动
+sleep 2
+
+# 7. 读取 file1 的完整内容（应触发 READ 事件，file1 读完后入队）
+echo ""
+echo "Step 7: Reading file1 completely via MFS mount point..."
+echo "  Expected: file1 read → queued, still in cache"
+dd if=/var/tmp/mfs/mount/file1 of=/dev/null bs=1M count=1 2>/dev/null
+echo "file1 read completed"
+sleep 2
+
+# 8. 检查 file1 的 cache 状态（应该仍在 cache，因为等待新文件开始）
+echo ""
+echo "Step 8: Checking file1 cache status (should be in cache, waiting)..."
+vmtouch -v /var/tmp/mfs/data/file1 2>&1 | tail -20
+
+# 9. 读取 file2 的完整内容（应触发新文件开始，驱逐 file1）
+echo ""
+echo "Step 9: Reading file2 completely via MFS mount point..."
+echo "  Expected: new file2 read → evict file1 → file2 in cache"
+dd if=/var/tmp/mfs/mount/file2 of=/dev/null bs=1M count=1 2>/dev/null
+echo "file2 read completed"
+sleep 2
+
+# 10. 检查 cache 状态（file1 应被驱逐，file2 应在 cache）
+echo ""
+echo "Step 10: Checking cache status after file2 read..."
+echo "=== file1 (should be EVICTED) ==="
+vmtouch -v /var/tmp/mfs/data/file1 2>&1 | tail -20
+echo "=== file2 (should be in cache) ==="
+vmtouch -v /var/tmp/mfs/data/file2 2>&1 | tail -20
+
+# 11. 读取 file3 的完整内容（应触发新文件开始，驱逐 file2）
+echo ""
+echo "Step 11: Reading file3 completely via MFS mount point..."
+echo "  Expected: new file3 read → evict file2 → file3 in cache"
+dd if=/var/tmp/mfs/mount/file3 of=/dev/null bs=1M count=1 2>/dev/null
+echo "file3 read completed"
+sleep 2
+
+# 12. 检查 cache 状态（file2 应被驱逐，file3 应在 cache）
+echo ""
+echo "Step 12: Checking cache status after file3 read..."
+echo "=== file2 (should be EVICTED) ==="
+vmtouch -v /var/tmp/mfs/data/file2 2>&1 | tail -20
+echo "=== file3 (should be in cache) ==="
+vmtouch -v /var/tmp/mfs/data/file3 2>&1 | tail -20
+
+# 13. 读取 cache 状态
+echo ""
+echo "Step 13: Checking system cache status..."
+cat /proc/meminfo | grep -E 'Cached|Buffers|Slab|SReclaimable'
+
+# 14. 清理
+echo ""
+echo "Step 14: Cleanup..."
+kill $MFS_PID 2>/dev/null
+sleep 1
+umount /var/tmp/mfs/mount 2>/dev/null
+if [ $? -ne 0 ]; then
+    echo "ERROR: umount MFS failed"
+    exit 1
+fi
+rm -rf /var/tmp/mfs
+echo "Cleanup done"
+echo ""
+echo "=== Test Complete ==="
+echo ""
+echo "Summary:"
+echo "  - Step 8: file1 should be in cache (queued, waiting for next file)"
+echo "  - Step 10: file1 should be EVICTED, file2 should be in cache"
+echo "  - Step 12: file2 should be EVICTED, file3 should be in cache"
+echo ""
+echo "Expected behavior:"
+echo "  - Files are NOT evicted immediately after reading completes"
+echo "  - Files ARE evicted when the NEXT file starts reading"
+echo "  - This ensures the application has time to process the data"
+echo ""
+echo "This test uses MFS_IOC_EVICT ioctl for more efficient cache eviction."
